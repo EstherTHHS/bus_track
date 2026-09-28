@@ -1,0 +1,1604 @@
+{
+  "info": {
+    "_postman_id": "b5f1c0a2-7d43-4e18-9c62-0a1b2c3d4e5f",
+    "name": "bus_track API",
+    "description": "# bus_track API\n\nA personal ferry-commute tracker. You record the legs of your ferry commute; the API\ncounts them into half days and full days.\n\n**Base URL:** `{{base_url}}` — `http://localhost:8000` by default. Every endpoint is\nprefixed with `/api` (Laravel's default API prefix).\n\n---\n\n## Getting started\n\n1. Import this collection **and** `bus_track.postman_environment.json`.\n2. Select **bus_track (local)** in the environment picker (top right). Nothing works\n   without it — `{{base_url}}` and `{{token}}` live there.\n3. Start the API:\n\n   ```sh\n   php artisan migrate --seed\n   php artisan serve\n   ```\n\n4. Run **Auth → Register**, or **Auth → Login** with the seeded account\n   (`test@example.com` / `password`).\n\n   The token from the response is written into `{{token}}` by a test script on those two\n   requests. Every other request inherits it through the collection's Bearer auth, so\n   there is no token to copy and paste anywhere.\n\n5. Run the rest in any order. **Ferry Trips → Record a day** also saves the created\n   leg's id into `{{trip_id}}`, which makes **Delete a leg** runnable immediately.\n\n---\n\n## Authentication\n\nLaravel Sanctum **personal access tokens**, sent as a header:\n\n```\nAuthorization: Bearer 1|nQ8vK2mZ...\n```\n\n- Tokens are issued **only** by `POST /api/register` and `POST /api/login`.\n- Tokens **never expire** (`config/sanctum.php` → `'expiration' => null`) and there is no\n  refresh endpoint. Store one and reuse it.\n- Every login mints a **new** token and leaves older ones valid.\n- `POST /api/logout` revokes **only the token used for that request** — your other\n  devices stay signed in. There is no \"sign out everywhere\".\n- This is a pure token API. Cookie/SPA (stateful) mode is **not** enabled, so you never\n  call `GET /sanctum/csrf-cookie` and never deal with CSRF or XSRF headers.\n\nNo token, a malformed token, or a revoked token on a protected route gives **401**\n`{\"message\": \"Unauthenticated.\"}`.\n\n---\n\n## How days are counted\n\nA commute day has at most **two legs**: `morning` and `evening`. Each leg carries a\nstatus, and only `taken` is worth anything:\n\n| `status` | counts as | meaning |\n| --- | --- | --- |\n| `taken` | **0.5** day | you were on the ferry |\n| `missed` | 0 | you did not make it |\n| `cancelled` | 0 | the ferry did not run |\n\nSo a `day_count` is only ever `0`, `0.5`, or `1`. Both legs taken is a full day; one\nleg is a half day. `missed` and `cancelled` are kept for history but add nothing to the\ntotals.\n\n**These are floats, but PHP drops the trailing `.0`.** A full day arrives as `1`, not\n`1.0`, and an empty month as `0`. Halves keep their decimal: `0.5`, `1.5`. In a typed\nclient, decode `day_count` and `total_days` as a float/double — decoding them as an\ninteger will work right up until someone takes a single leg.\n\nLegs are unique **per user, per date, per leg** — there is a database constraint on\n`(user_id, trip_date, leg)`. That constraint is why `POST /api/ferry-trips/day` upserts\ninstead of piling up duplicates.\n\n---\n\n## Conventions\n\n- **Always send `Accept: application/json`.** Every request in this collection does.\n- POST bodies are raw JSON with `Content-Type: application/json`.\n- Dates are `YYYY-MM-DD`. Times are 24-hour `HH:MM` on the way in.\n- The optional `month` query parameter is **strictly** `YYYY-MM`, e.g. `2026-09`.\n  `2026-9`, `September` and `2026-09-01` are all rejected with 422. Omit it to get the\n  current month.\n- Everything is scoped to the authenticated user. You can never read or delete another\n  user's trips.\n- **No pagination anywhere** — a month holds at most ~62 legs, so reads return the whole\n  month.\n- Responses are plain JSON objects. There is no `data` wrapper and no envelope.\n\n---\n\n## Errors\n\nValidation failures use Laravel's standard 422 envelope:\n\n```json\n{\n  \"message\": \"The trip date field must match the format Y-m-d.\",\n  \"errors\": {\n    \"trip_date\": [\"The trip date field must match the format Y-m-d.\"]\n  }\n}\n```\n\nFields inside arrays are reported with dotted paths — `legs.0.status`, `legs.1.leg`.\n\n| Code | When |\n| --- | --- |\n| 200 | OK |\n| 201 | Created — **also returned when `POST /day` updates an existing leg** |\n| 204 | Success with an empty body (logout, delete) |\n| 401 | Missing, malformed, or revoked token |\n| 404 | Trip does not exist **or** belongs to someone else |\n| 422 | Validation failed — **including wrong login credentials** |\n| 429 | More than 5 register/login attempts in a minute from one IP |\n\n### Three things that surprise people\n\n1. **A failed login is 422, not 401.** The error hangs off the `email` field:\n   `errors.email[0] = \"The provided credentials are incorrect.\"` — identically for a\n   wrong password and for an unknown address. In this API, 401 only ever means \"no valid\n   token on a protected route\".\n2. **`/api/register` and `/api/login` are throttled to 5 requests per minute per IP.**\n   Re-running Login while poking around returns 429 `{\"message\": \"Too Many Attempts.\"}`\n   with a `Retry-After` header. The ferry-trip routes are not throttled.\n3. **`POST /api/ferry-trips/day` overwrites.** See that request's own documentation\n   before calling it twice for the same date — fields you omit are cleared.\n\n---\n\n## Endpoints at a glance\n\n| Method | Path | Auth | Purpose |\n| --- | --- | --- | --- |\n| POST | `/api/register` | — | Create an account, get a token |\n| POST | `/api/login` | — | Get a token |\n| GET | `/api/me` | Bearer | The current user |\n| POST | `/api/logout` | Bearer | Revoke the current token |\n| GET | `/api/ferry-trips` | Bearer | One month of legs, grouped by day |\n| GET | `/api/ferry-trips/summary` | Bearer | Month totals (full / half / total days) |\n| POST | `/api/ferry-trips/day` | Bearer | Record or correct one day's legs |\n| DELETE | `/api/ferry-trips/{id}` | Bearer | Delete a single leg |\n| GET | `/up` | — | Framework health check (not under `/api`) |\n",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000",
+      "type": "string",
+      "description": "Fallback so the collection works even without the environment imported. The environment's value wins."
+    },
+    {
+      "key": "token",
+      "value": "",
+      "type": "string",
+      "description": "Filled in automatically by Register / Login."
+    },
+    {
+      "key": "user_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "trip_id",
+      "value": "",
+      "type": "string",
+      "description": "Filled in automatically by Record a day."
+    },
+    {
+      "key": "month",
+      "value": "2026-09",
+      "type": "string"
+    },
+    {
+      "key": "email",
+      "value": "test@example.com",
+      "type": "string"
+    },
+    {
+      "key": "password",
+      "value": "password",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health check",
+      "request": {
+        "auth": {
+          "type": "noauth"
+        },
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/up",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "up"
+          ]
+        },
+        "description": "Laravel's built-in health check. Use it to confirm `{{base_url}}` points at a running\nserver before you start debugging authentication.\n\n`GET /up` · no auth · **not** under `/api`\n\nRegistered by `health: '/up'` in `bootstrap/app.php`. Returns **200** with a small HTML\npage when the application boots; anything else (500, or a connection error) means the app\nitself is broken rather than your request.\n"
+      },
+      "response": [
+        {
+          "name": "200 OK",
+          "originalRequest": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/up",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "up"
+              ]
+            }
+          },
+          "status": "OK",
+          "code": 200,
+          "_postman_preview_language": "html",
+          "header": [],
+          "cookie": [],
+          "body": "",
+          "_postman_previewlanguage": "html"
+        }
+      ]
+    },
+    {
+      "name": "Auth",
+      "description": "Getting and dropping a token.\n\n**Register** and **Login** are the only public endpoints in the API and the only source\nof tokens. Both are throttled to **5 requests per minute per IP** — a 429 while testing\njust means you need to wait a minute.\n\nBoth write the returned token into `{{token}}` (and the user's id into `{{user_id}}`) via\na test script, so there is nothing to copy by hand. Everything in **Ferry Trips** then\npicks it up from the collection's Bearer auth.\n\n**Get current user** is the cheap way to check whether a stored token is still valid —\nuseful on app boot. **Logout** revokes the current token only.\n",
+      "item": [
+        {
+          "name": "Register",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Saves the token so every other request in this collection authenticates itself.",
+                  "// Written to both scopes: the environment wins if one is selected, the collection",
+                  "// variable keeps things working if none is.",
+                  "const body = pm.response.json();",
+                  "",
+                  "if (body.token) {",
+                  "    pm.environment.set(\"token\", body.token);",
+                  "    pm.collectionVariables.set(\"token\", body.token);",
+                  "    console.log(\"Token saved to {{token}}\");",
+                  "}",
+                  "",
+                  "if (body.user && body.user.id) {",
+                  "    pm.environment.set(\"user_id\", body.user.id);",
+                  "    pm.collectionVariables.set(\"user_id\", body.user.id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Esther\",\n  \"email\": \"esther@test.com\",\n  \"password\": \"password123\",\n  \"password_confirmation\": \"password123\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/register",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "register"
+              ]
+            },
+            "description": "Create an account and receive an API token in one call.\n\n`POST /api/register` · no auth · **throttled to 5 requests/minute per IP**\n\n### Body\n\n| Field | Type | Required | Rules |\n| --- | --- | --- | --- |\n| `name` | string | yes | max 255 characters |\n| `email` | string | yes | valid email, max 255, **must not already be registered** |\n| `password` | string | yes | min 8 characters, must match `password_confirmation` |\n| `password_confirmation` | string | yes | must equal `password` |\n\n### 201 Created\n\n```json\n{\n  \"user\": {\n    \"name\": \"Esther\",\n    \"email\": \"esther@test.com\",\n    \"updated_at\": \"2026-09-28T15:56:03.000000Z\",\n    \"created_at\": \"2026-09-28T15:56:03.000000Z\",\n    \"id\": 2\n  },\n  \"token\": \"2|nQ8vK2mZ7pR4tL9wX3cY6bF1hJ5sD0gA8eU2iO7k\"\n}\n```\n\n- `token` is the plain-text token — **this is the only time you will ever see it**. The\n  server stores a hash. The token is named `react-app` server-side and never expires.\n- `password` is never returned, for any endpoint.\n- The freshly created user has no `email_verified_at` key at all (nothing has set it);\n  `GET /api/me` returns it as `null`.\n- The test script on this request stores `token` and `user_id` for you.\n\n### Failures\n\n| Cause | Code | Error key |\n| --- | --- | --- |\n| Email already registered | 422 | `email` |\n| `password` shorter than 8 characters | 422 | `password` |\n| `password_confirmation` missing or different | 422 | `password` |\n| Any required field missing | 422 | that field |\n| 6th attempt inside one minute | 429 | — (`{\"message\": \"Too Many Attempts.\"}`) |\n\nThe body here uses a literal address rather than `{{email}}` so it does not collide with\nthe seeded user. Change the email if you re-run it — a second call with the same address\nis a 422.\n"
+          },
+          "response": [
+            {
+              "name": "201 Created",
+              "originalRequest": {
+                "auth": {
+                  "type": "noauth"
+                },
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"Esther\",\n  \"email\": \"esther@test.com\",\n  \"password\": \"password123\",\n  \"password_confirmation\": \"password123\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{base_url}}/api/register",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "register"
+                  ]
+                }
+              },
+              "status": "Created",
+              "code": 201,
+              "_postman_preview_language": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"user\": {\n    \"name\": \"Esther\",\n    \"email\": \"esther@test.com\",\n    \"updated_at\": \"2026-09-28T15:56:03.000000Z\",\n    \"created_at\": \"2026-09-28T15:56:03.000000Z\",\n    \"id\": 2\n  },\n  \"token\": \"2|nQ8vK2mZ7pR4tL9wX3cY6bF1hJ5sD0gA8eU2iO7k\"\n}",
+              "_postman_previewlanguage": "json"
+            },
+            {
+              "name": "422 Email already taken",
+              "originalRequest": {
+                "auth": {
+                  "type": "noauth"
+                },
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"Esther\",\n  \"email\": \"esther@test.com\",\n  \"password\": \"password123\",\n  \"password_confirmation\": \"password123\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{base_url}}/api/register",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "register"
+                  ]
+                }
+              },
+              "status": "Unprocessable Entity",
+              "code": 422,
+              "_postman_preview_language": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"message\": \"The email has already been taken.\",\n  \"errors\": {\n    \"email\": [\n      \"The email has already been taken.\"\n    ]\n  }\n}",
+              "_postman_previewlanguage": "json"
+            },
+            {
+              "name": "422 Password too short / unconfirmed",
+              "originalRequest": {
+                "auth": {
+                  "type": "noauth"
+                },
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"Esther\",\n  \"email\": \"esther@test.com\",\n  \"password\": \"password123\",\n  \"password_confirmation\": \"password123\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{base_url}}/api/register",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "register"
+                  ]
+                }
+              },
+              "status": "Unprocessable Entity",
+              "code": 422,
+              "_postman_preview_language": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"message\": \"The password field must be at least 8 characters. (and 1 more error)\",\n  \"errors\": {\n    \"password\": [\n      \"The password field must be at least 8 characters.\",\n      \"The password field confirmation does not match.\"\n    ]\n  }\n}",
+              "_postman_previewlanguage": "json"
+            }
+          ]
+        },
+        {
+          "name": "Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Saves the token so every other request in this collection authenticates itself.",
+                  "// Written to both scopes: the environment wins if one is selected, the collection",
+                  "// variable keeps things working if none is.",
+                  "const body = pm.response.json();",
+                  "",
+                  "if (body.token) {",
+                  "    pm.environment.set(\"token\", body.token);",
+                  "    pm.collectionVariables.set(\"token\", body.token);",
+                  "    console.log(\"Token saved to {{token}}\");",
+                  "}",
+                  "",
+                  "if (body.user && body.user.id) {",
+                  "    pm.environment.set(\"user_id\", body.user.id);",
+                  "    pm.collectionVariables.set(\"user_id\", body.user.id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{email}}\",\n  \"password\": \"{{password}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/login",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "login"
+              ]
+            },
+            "description": "Exchange email and password for a bearer token.\n\n`POST /api/login` · no auth · **throttled to 5 requests/minute per IP**\n\nThe body reads `{{email}}` and `{{password}}` from the environment, which ship pointing at\nthe account created by `php artisan db:seed` (`test@example.com` / `password`).\n\n### Body\n\n| Field | Type | Required | Rules |\n| --- | --- | --- | --- |\n| `email` | string | yes | valid email |\n| `password` | string | yes | — |\n\n### 200 OK\n\n```json\n{\n  \"user\": {\n    \"id\": 1,\n    \"name\": \"Test User\",\n    \"email\": \"test@example.com\",\n    \"email_verified_at\": \"2026-09-28T15:56:03.000000Z\",\n    \"created_at\": \"2026-09-28T15:56:03.000000Z\",\n    \"updated_at\": \"2026-09-28T15:56:03.000000Z\"\n  },\n  \"token\": \"3|Xy7bQ2nR8vT4mK9wL3cF6hJ1sD5gA0eU7iO2pZ4k\"\n}\n```\n\nNote the status: **200**, not 201. Every call mints a **new** token and leaves existing\nones valid, so logging in five times leaves five working tokens.\n\n### Failures\n\n| Cause | Code | Response |\n| --- | --- | --- |\n| Wrong password | 422 | `errors.email[0]`: `\"The provided credentials are incorrect.\"` |\n| Unknown email address | 422 | byte-identical to the above — the API will not tell you whether an address is registered |\n| Malformed email or missing field | 422 | `errors.email` / `errors.password` |\n| 6th attempt inside one minute | 429 | `{\"message\": \"Too Many Attempts.\"}` + `Retry-After` |\n\n**Bad credentials are 422, not 401.** If you are writing a client, read\n`errors.email[0]` for the message to show the user, and reserve your \"session expired\"\nhandling for a genuine 401.\n"
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "auth": {
+                  "type": "noauth"
+                },
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"email\": \"{{email}}\",\n  \"password\": \"{{password}}\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{base_url}}/api/login",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "login"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_preview_language": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"user\": {\n    \"id\": 1,\n    \"name\": \"Test User\",\n    \"email\": \"test@example.com\",\n    \"email_verified_at\": \"2026-09-28T15:56:03.000000Z\",\n    \"created_at\": \"2026-09-28T15:56:03.000000Z\",\n    \"updated_at\": \"2026-09-28T15:56:03.000000Z\"\n  },\n  \"token\": \"3|Xy7bQ2nR8vT4mK9wL3cF6hJ1sD5gA0eU7iO2pZ4k\"\n}",
+              "_postman_previewlanguage": "json"
+            },
+            {
+              "name": "422 Wrong password or unknown email",
+              "originalRequest": {
+                "auth": {
+                  "type": "noauth"
+                },
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"email\": \"{{email}}\",\n  \"password\": \"{{password}}\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{base_url}}/api/login",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "login"
+                  ]
+                }
+              },
+              "status": "Unprocessable Entity",
+              "code": 422,
+              "_postman_preview_language": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"message\": \"The provided credentials are incorrect.\",\n  \"errors\": {\n    \"email\": [\n      \"The provided credentials are incorrect.\"\n    ]\n  }\n}",
+              "_postman_previewlanguage": "json"
+            },
+            {
+              "name": "429 Too many attempts",
+              "originalRequest": {
+                "auth": {
+                  "type": "noauth"
+                },
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"email\": \"{{email}}\",\n  \"password\": \"{{password}}\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{base_url}}/api/login",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "login"
+                  ]
+                }
+              },
+              "status": "Too Many Requests",
+              "code": 429,
+              "_postman_preview_language": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"message\": \"Too Many Attempts.\"\n}",
+              "_postman_previewlanguage": "json"
+            }
+          ]
+        },
+        {
+          "name": "Get current user",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/me",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "me"
+              ]
+            },
+            "description": "The current user. The cheap way to check whether a stored token is still good.\n\n`GET /api/me` · Bearer token\n\nNo parameters, no body.\n\n### 200 OK\n\nThe user object **is the whole body** — there is no `user` wrapper here, unlike register\nand login. Watch for that when writing a client.\n\n```json\n{\n  \"id\": 1,\n  \"name\": \"Test User\",\n  \"email\": \"test@example.com\",\n  \"email_verified_at\": \"2026-09-28T15:56:03.000000Z\",\n  \"created_at\": \"2026-09-28T15:56:03.000000Z\",\n  \"updated_at\": \"2026-09-28T15:56:03.000000Z\"\n}\n```\n\n`email_verified_at` is `null` for accounts created through `POST /api/register` — there\nis no verification flow in this API. `password` and `remember_token` are hidden by the\nmodel and never appear in any response.\n\n### Failures\n\n| Cause | Code | Response |\n| --- | --- | --- |\n| No `Authorization` header | 401 | `{\"message\": \"Unauthenticated.\"}` |\n| Token revoked by an earlier logout | 401 | same |\n"
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/me",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "me"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_preview_language": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"id\": 1,\n  \"name\": \"Test User\",\n  \"email\": \"test@example.com\",\n  \"email_verified_at\": \"2026-09-28T15:56:03.000000Z\",\n  \"created_at\": \"2026-09-28T15:56:03.000000Z\",\n  \"updated_at\": \"2026-09-28T15:56:03.000000Z\"\n}",
+              "_postman_previewlanguage": "json"
+            },
+            {
+              "name": "401 Unauthenticated",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/me",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "me"
+                  ]
+                }
+              },
+              "status": "Unauthorized",
+              "code": 401,
+              "_postman_preview_language": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"message\": \"Unauthenticated.\"\n}",
+              "_postman_previewlanguage": "json"
+            }
+          ]
+        },
+        {
+          "name": "Logout",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/logout",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "logout"
+              ]
+            },
+            "description": "Revoke the token this request authenticated with.\n\n`POST /api/logout` · Bearer token\n\nNo body.\n\n### 204 No Content\n\nEmpty response body. The row is deleted from `personal_access_tokens`, so the same token\nreturns 401 from here on.\n\nOnly **this** token is revoked — tokens issued to your other devices keep working. There\nis no endpoint that revokes everything.\n\n### Failures\n\n| Cause | Code |\n| --- | --- |\n| No token, or an already-revoked token | 401 |\n\nAfter running this, `{{token}}` in your environment is dead: run **Login** again before\nusing the Ferry Trips folder.\n"
+          },
+          "response": [
+            {
+              "name": "204 No Content",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/logout",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "logout"
+                  ]
+                }
+              },
+              "status": "No Content",
+              "code": 204,
+              "_postman_preview_language": "text",
+              "header": [],
+              "cookie": [],
+              "body": "",
+              "_postman_previewlanguage": "text"
+            },
+            {
+              "name": "401 Unauthenticated",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/logout",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "logout"
+                  ]
+                }
+              },
+              "status": "Unauthorized",
+              "code": 401,
+              "_postman_preview_language": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"message\": \"Unauthenticated.\"\n}",
+              "_postman_previewlanguage": "json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Ferry Trips",
+      "description": "The trip log. All four endpoints require `Authorization: Bearer {{token}}` (inherited\nfrom the collection) and operate **only on the calling user's own trips**.\n\nRead with **List month** for every leg grouped by date, or **Monthly summary** for just\nthe totals. Write with **Record a day** — it upserts, so it is both \"create\" and \"fix a\nmistake\". **Delete a leg** removes a single row by id.\n\nBoth read endpoints take the same optional `month=YYYY-MM` parameter and fall back to\nthe current month.\n",
+      "item": [
+        {
+          "name": "List month",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/ferry-trips?month={{month}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "ferry-trips"
+              ],
+              "query": [
+                {
+                  "key": "month",
+                  "value": "{{month}}",
+                  "description": "Optional. Exactly YYYY-MM (e.g. 2026-09). Omit or disable this row for the current month. 2026-9 and September are 422s."
+                }
+              ]
+            },
+            "description": "One month of recorded legs, grouped into days.\n\n`GET /api/ferry-trips` · Bearer token\n\n### Query parameters\n\n| Param | Type | Required | Rules | Default |\n| --- | --- | --- | --- | --- |\n| `month` | string | no | exactly `YYYY-MM` | the current month |\n\n### 200 OK\n\n```json\n{\n  \"month\": \"2026-09\",\n  \"days\": [\n    {\n      \"date\": \"2026-09-27\",\n      \"morning\": {\n        \"id\": 1,\n        \"trip_date\": \"2026-09-27\",\n        \"leg\": \"morning\",\n        \"trip_time\": \"07:45:00\",\n        \"status\": \"taken\",\n        \"note\": null,\n        \"created_at\": \"2026-09-27T07:50:11.000000Z\",\n        \"updated_at\": \"2026-09-27T07:50:11.000000Z\",\n        \"count\": 0.5\n      },\n      \"evening\": null,\n      \"day_count\": 0.5\n    }\n  ]\n}\n```\n\n| Key | Type | Notes |\n| --- | --- | --- |\n| `month` | string | the month that was read, echoed back as `YYYY-MM` |\n| `days` | array | **sorted by date ascending**; only dates with at least one recorded leg appear |\n| `days[].date` | string | `YYYY-MM-DD` |\n| `days[].morning` | object \\| **null** | the leg object, or `null` when that leg was never recorded |\n| `days[].evening` | object \\| **null** | same |\n| `days[].day_count` | float | `0`, `0.5` or `1` for that date — decode as a float, see below |\n\nThings to know before you build a UI on this:\n\n- **Null-check both legs.** A day with only a morning entry has `\"evening\": null` — the\n  key is present but empty.\n- Days with nothing recorded are **absent** from the array, not present with nulls. Zip\n  it against your own calendar rather than assuming one entry per day.\n- A leg's `count` is `0.5` when `status` is `taken`, otherwise `0`. `day_count` is the sum\n  for that date.\n- `trip_time` may be `null`, and **its precision depends on the database driver**: MySQL\n  returns the `TIME` column as `\"07:45:00\"`, while SQLite echoes back the `\"07:45\"` that\n  was written. Match on `HH:MM` and ignore any trailing seconds.\n- `user_id` is hidden on every leg, by design.\n- No pagination and no envelope: the whole month is in `days`.\n- Only your own trips are visible. Another user's legs on the same dates are not merged\n  in and cannot be seen.\n- Month boundaries are exact: with `month=2026-09` you get 09-01 to 09-30 and nothing\n  from August or October.\n\n### Failures\n\n| Cause | Code | Error key |\n| --- | --- | --- |\n| `month=2026-9`, `month=September`, `month=2026-09-01` | 422 | `month` |\n| No token | 401 | — |\n\nA month with no trips is a normal **200** with `\"days\": []`.\n"
+          },
+          "response": [
+            {
+              "name": "200 A half day and a full day",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/ferry-trips?month={{month}}",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "ferry-trips"
+                  ],
+                  "query": [
+                    {
+                      "key": "month",
+                      "value": "{{month}}",
+                      "description": "Optional. Exactly YYYY-MM (e.g. 2026-09). Omit or disable this row for the current month. 2026-9 and September are 422s."
+                    }
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_preview_language": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"month\": \"2026-09\",\n  \"days\": [\n    {\n      \"date\": \"2026-09-27\",\n      \"morning\": {\n        \"id\": 1,\n        \"trip_date\": \"2026-09-27\",\n        \"leg\": \"morning\",\n        \"trip_time\": \"07:45:00\",\n        \"status\": \"taken\",\n        \"note\": null,\n        \"created_at\": \"2026-09-27T07:50:11.000000Z\",\n        \"updated_at\": \"2026-09-27T07:50:11.000000Z\",\n        \"count\": 0.5\n      },\n      \"evening\": null,\n      \"day_count\": 0.5\n    },\n    {\n      \"date\": \"2026-09-28\",\n      \"morning\": {\n        \"id\": 2,\n        \"trip_date\": \"2026-09-28\",\n        \"leg\": \"morning\",\n        \"trip_time\": \"07:45:00\",\n        \"status\": \"taken\",\n        \"note\": null,\n        \"created_at\": \"2026-09-28T08:01:44.000000Z\",\n        \"updated_at\": \"2026-09-28T08:01:44.000000Z\",\n        \"count\": 0.5\n      },\n      \"evening\": {\n        \"id\": 3,\n        \"trip_date\": \"2026-09-28\",\n        \"leg\": \"evening\",\n        \"trip_time\": \"18:10:00\",\n        \"status\": \"taken\",\n        \"note\": null,\n        \"created_at\": \"2026-09-28T08:01:44.000000Z\",\n        \"updated_at\": \"2026-09-28T08:01:44.000000Z\",\n        \"count\": 0.5\n      },\n      \"day_count\": 1\n    }\n  ]\n}",
+              "_postman_previewlanguage": "json"
+            },
+            {
+              "name": "200 Nothing recorded yet",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/ferry-trips?month={{month}}",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "ferry-trips"
+                  ],
+                  "query": [
+                    {
+                      "key": "month",
+                      "value": "{{month}}",
+                      "description": "Optional. Exactly YYYY-MM (e.g. 2026-09). Omit or disable this row for the current month. 2026-9 and September are 422s."
+                    }
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_preview_language": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"month\": \"2026-09\",\n  \"days\": []\n}",
+              "_postman_previewlanguage": "json"
+            },
+            {
+              "name": "422 Bad month format",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/ferry-trips?month={{month}}",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "ferry-trips"
+                  ],
+                  "query": [
+                    {
+                      "key": "month",
+                      "value": "{{month}}",
+                      "description": "Optional. Exactly YYYY-MM (e.g. 2026-09). Omit or disable this row for the current month. 2026-9 and September are 422s."
+                    }
+                  ]
+                }
+              },
+              "status": "Unprocessable Entity",
+              "code": 422,
+              "_postman_preview_language": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"message\": \"The month field must match the format Y-m.\",\n  \"errors\": {\n    \"month\": [\n      \"The month field must match the format Y-m.\"\n    ]\n  }\n}",
+              "_postman_previewlanguage": "json"
+            },
+            {
+              "name": "401 Unauthenticated",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/ferry-trips?month={{month}}",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "ferry-trips"
+                  ],
+                  "query": [
+                    {
+                      "key": "month",
+                      "value": "{{month}}",
+                      "description": "Optional. Exactly YYYY-MM (e.g. 2026-09). Omit or disable this row for the current month. 2026-9 and September are 422s."
+                    }
+                  ]
+                }
+              },
+              "status": "Unauthorized",
+              "code": 401,
+              "_postman_preview_language": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"message\": \"Unauthenticated.\"\n}",
+              "_postman_previewlanguage": "json"
+            }
+          ]
+        },
+        {
+          "name": "Monthly summary",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/ferry-trips/summary?month={{month}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "ferry-trips",
+                "summary"
+              ],
+              "query": [
+                {
+                  "key": "month",
+                  "value": "{{month}}",
+                  "description": "Optional. Exactly YYYY-MM (e.g. 2026-09). Omit or disable this row for the current month. 2026-9 and September are 422s."
+                }
+              ]
+            },
+            "description": "Month totals — the numbers you would put on an expense claim.\n\n`GET /api/ferry-trips/summary` · Bearer token\n\n### Query parameters\n\n| Param | Type | Required | Rules | Default |\n| --- | --- | --- | --- | --- |\n| `month` | string | no | exactly `YYYY-MM` | the current month |\n\n### 200 OK\n\nExactly four keys, always present:\n\n```json\n{\n  \"month\": \"2026-09\",\n  \"total_days\": 1.5,\n  \"full_days\": 1,\n  \"half_days\": 1\n}\n```\n\n| Key | Type | Meaning |\n| --- | --- | --- |\n| `month` | string | the month that was summarised, `YYYY-MM` |\n| `total_days` | float | every `taken` leg counted as 0.5 and summed |\n| `full_days` | int | dates where **both** legs were taken (`day_count >= 1`) |\n| `half_days` | int | dates where **exactly one** leg was taken (`0 < day_count < 1`) |\n\n`full_days + half_days` is the number of days you travelled at all, and\n`total_days == full_days + half_days / 2`. The example above is one full day plus one\nhalf day.\n\nDates where every leg was `missed` or `cancelled` count towards **none** of the three\nnumbers — they are not half days.\n\nA month with no trips, or one where nothing was taken, returns **200** with\n`total_days: 0, full_days: 0, half_days: 0`. Never a 404.\n\n`total_days` is a float, but whole values arrive with no decimal point — `2`, never\n`2.0`, while a month ending on a half day gives `2.5`. Decode it as a float/double.\n\n### Failures\n\n| Cause | Code | Error key |\n| --- | --- | --- |\n| Badly formatted `month` | 422 | `month` |\n| No token | 401 | — |\n"
+          },
+          "response": [
+            {
+              "name": "200 One full day, one half day",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/ferry-trips/summary?month={{month}}",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "ferry-trips",
+                    "summary"
+                  ],
+                  "query": [
+                    {
+                      "key": "month",
+                      "value": "{{month}}",
+                      "description": "Optional. Exactly YYYY-MM (e.g. 2026-09). Omit or disable this row for the current month. 2026-9 and September are 422s."
+                    }
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_preview_language": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"month\": \"2026-09\",\n  \"total_days\": 1.5,\n  \"full_days\": 1,\n  \"half_days\": 1\n}",
+              "_postman_previewlanguage": "json"
+            },
+            {
+              "name": "200 Empty month (or all missed/cancelled)",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/ferry-trips/summary?month={{month}}",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "ferry-trips",
+                    "summary"
+                  ],
+                  "query": [
+                    {
+                      "key": "month",
+                      "value": "{{month}}",
+                      "description": "Optional. Exactly YYYY-MM (e.g. 2026-09). Omit or disable this row for the current month. 2026-9 and September are 422s."
+                    }
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_preview_language": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"month\": \"2026-09\",\n  \"total_days\": 0,\n  \"full_days\": 0,\n  \"half_days\": 0\n}",
+              "_postman_previewlanguage": "json"
+            },
+            {
+              "name": "422 Bad month format",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/ferry-trips/summary?month={{month}}",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "ferry-trips",
+                    "summary"
+                  ],
+                  "query": [
+                    {
+                      "key": "month",
+                      "value": "{{month}}",
+                      "description": "Optional. Exactly YYYY-MM (e.g. 2026-09). Omit or disable this row for the current month. 2026-9 and September are 422s."
+                    }
+                  ]
+                }
+              },
+              "status": "Unprocessable Entity",
+              "code": 422,
+              "_postman_preview_language": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"message\": \"The month field must match the format Y-m.\",\n  \"errors\": {\n    \"month\": [\n      \"The month field must match the format Y-m.\"\n    ]\n  }\n}",
+              "_postman_previewlanguage": "json"
+            }
+          ]
+        },
+        {
+          "name": "Record a day",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Saves the first returned leg's id so \"Delete a leg\" is runnable straight away.",
+                  "const body = pm.response.json();",
+                  "",
+                  "if (body.trips && body.trips.length) {",
+                  "    pm.environment.set(\"trip_id\", body.trips[0].id);",
+                  "    pm.collectionVariables.set(\"trip_id\", body.trips[0].id);",
+                  "    console.log(\"trip_id = \" + body.trips[0].id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"trip_date\": \"2026-09-28\",\n  \"legs\": [\n    {\n      \"leg\": \"morning\",\n      \"trip_time\": \"07:45\",\n      \"status\": \"taken\"\n    },\n    {\n      \"leg\": \"evening\",\n      \"trip_time\": \"18:10\",\n      \"status\": \"taken\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/ferry-trips/day",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "ferry-trips",
+                "day"
+              ]
+            },
+            "description": "Record — or correct — the legs of a single day. This is the only write endpoint in the\nAPI.\n\n`POST /api/ferry-trips/day` · Bearer token\n\n### Body\n\n| Field | Type | Required | Rules |\n| --- | --- | --- | --- |\n| `trip_date` | string | yes | exactly `YYYY-MM-DD` |\n| `legs` | array | yes | 1 or 2 items |\n| `legs[].leg` | string | yes | `morning` or `evening`; if you send two, they must differ |\n| `legs[].status` | string | yes | `taken`, `missed`, or `cancelled` |\n| `legs[].trip_time` | string \\| null | no | exactly `HH:MM`, 24-hour — `07:45`, `18:10`. **Not** `07:45:00` |\n| `legs[].note` | string \\| null | no | max 255 characters |\n\n### It upserts — read this before calling it twice\n\nThere is a unique index on `(user_id, trip_date, leg)` and the controller uses\n`updateOrCreate`, so posting the same `trip_date` + `leg` again **overwrites that leg**\nrather than adding a second row. Four consequences:\n\n1. The response is **201 Created even when it updated** an existing leg. Never treat 201\n   here as \"a new record was inserted\".\n2. **Fields you leave out are written as `null`, not left alone.** Re-posting\n   `{\"leg\": \"morning\", \"status\": \"taken\"}` for a leg that already had a `trip_time` and a\n   `note` **clears both**. Always send the complete state of the leg you are writing.\n3. You can post one leg now and the other later — they are independent rows, and the\n   second call does not disturb the first.\n4. Sending `user_id` in the body has no effect. It is not mass-assignable and is always\n   taken from your token, so you cannot write into someone else's log.\n\nAll legs in one request are written inside a database transaction: either every leg lands\nor none does.\n\n### 201 Created\n\n```json\n{\n  \"date\": \"2026-09-28\",\n  \"trips\": [\n    {\n      \"trip_date\": \"2026-09-28\",\n      \"leg\": \"morning\",\n      \"trip_time\": \"07:45\",\n      \"status\": \"taken\",\n      \"note\": null,\n      \"updated_at\": \"2026-09-28T08:01:44.000000Z\",\n      \"created_at\": \"2026-09-28T08:01:44.000000Z\",\n      \"id\": 5,\n      \"count\": 0.5\n    }\n  ],\n  \"day_count\": 1\n}\n```\n\n- `trips` comes back in the same order as the `legs` you sent.\n- `day_count` is the new total for that date: `0`, `0.5`, or `1` — a float, but whole\n  values arrive without a decimal point (`1`, never `1.0`).\n- ⚠️ `trip_time` **echoes back exactly what you sent** (`\"07:45\"`) because the model is\n  not re-read from the database. `GET /api/ferry-trips` does re-read it, so on MySQL the\n  very same row comes back as `\"07:45:00\"`. Never compare the two literally.\n- The test script on this request saves `trips[0].id` into `{{trip_id}}`, which makes\n  **Delete a leg** runnable straight away.\n\n### Failures\n\n| Cause | Code | Error key |\n| --- | --- | --- |\n| `trip_date` not `YYYY-MM-DD` (e.g. `28-09-2026`) | 422 | `trip_date` |\n| `legs` missing, empty, or more than 2 items | 422 | `legs` |\n| The same `leg` value twice in one call | 422 | `legs.0.leg` **and** `legs.1.leg` |\n| `status` not one of the three allowed values | 422 | `legs.0.status` |\n| `trip_time` not `HH:MM` (e.g. `07:45:00`, `7:45 am`) | 422 | `legs.0.trip_time` |\n| `note` longer than 255 characters | 422 | `legs.0.note` |\n| No token | 401 | — |\n\n### Other bodies worth keeping\n\nA half day — morning only:\n\n```json\n{\n  \"trip_date\": \"2026-09-27\",\n  \"legs\": [\n    { \"leg\": \"morning\", \"trip_time\": \"07:45\", \"status\": \"taken\" }\n  ]\n}\n```\n\nMissed the morning, evening ferry was cancelled — `day_count` comes back `0`, and\n`trip_time` is optional so it is simply left out:\n\n```json\n{\n  \"trip_date\": \"2026-09-26\",\n  \"legs\": [\n    { \"leg\": \"morning\", \"status\": \"missed\", \"note\": \"Overslept\" },\n    { \"leg\": \"evening\", \"status\": \"cancelled\" }\n  ]\n}\n```\n\nBoth of these are saved as response examples on this request.\n"
+          },
+          "response": [
+            {
+              "name": "201 Full day (day_count 1)",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"trip_date\": \"2026-09-28\",\n  \"legs\": [\n    {\n      \"leg\": \"morning\",\n      \"trip_time\": \"07:45\",\n      \"status\": \"taken\"\n    },\n    {\n      \"leg\": \"evening\",\n      \"trip_time\": \"18:10\",\n      \"status\": \"taken\"\n    }\n  ]\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{base_url}}/api/ferry-trips/day",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "ferry-trips",
+                    "day"
+                  ]
+                }
+              },
+              "status": "Created",
+              "code": 201,
+              "_postman_preview_language": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"date\": \"2026-09-28\",\n  \"trips\": [\n    {\n      \"trip_date\": \"2026-09-28\",\n      \"leg\": \"morning\",\n      \"trip_time\": \"07:45\",\n      \"status\": \"taken\",\n      \"note\": null,\n      \"updated_at\": \"2026-09-28T08:01:44.000000Z\",\n      \"created_at\": \"2026-09-28T08:01:44.000000Z\",\n      \"id\": 2,\n      \"count\": 0.5\n    },\n    {\n      \"trip_date\": \"2026-09-28\",\n      \"leg\": \"evening\",\n      \"trip_time\": \"18:10\",\n      \"status\": \"taken\",\n      \"note\": null,\n      \"updated_at\": \"2026-09-28T08:01:44.000000Z\",\n      \"created_at\": \"2026-09-28T08:01:44.000000Z\",\n      \"id\": 3,\n      \"count\": 0.5\n    }\n  ],\n  \"day_count\": 1\n}",
+              "_postman_previewlanguage": "json"
+            },
+            {
+              "name": "201 Half day (day_count 0.5)",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"trip_date\": \"2026-09-27\",\n  \"legs\": [\n    {\n      \"leg\": \"morning\",\n      \"trip_time\": \"07:45\",\n      \"status\": \"taken\"\n    }\n  ]\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{base_url}}/api/ferry-trips/day",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "ferry-trips",
+                    "day"
+                  ]
+                }
+              },
+              "status": "Created",
+              "code": 201,
+              "_postman_preview_language": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"date\": \"2026-09-27\",\n  \"trips\": [\n    {\n      \"trip_date\": \"2026-09-27\",\n      \"leg\": \"morning\",\n      \"trip_time\": \"07:45\",\n      \"status\": \"taken\",\n      \"note\": null,\n      \"updated_at\": \"2026-09-27T07:50:11.000000Z\",\n      \"created_at\": \"2026-09-27T07:50:11.000000Z\",\n      \"id\": 1,\n      \"count\": 0.5\n    }\n  ],\n  \"day_count\": 0.5\n}",
+              "_postman_previewlanguage": "json"
+            },
+            {
+              "name": "201 Missed + cancelled (day_count 0)",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"trip_date\": \"2026-09-26\",\n  \"legs\": [\n    {\n      \"leg\": \"morning\",\n      \"status\": \"missed\",\n      \"note\": \"Overslept\"\n    },\n    {\n      \"leg\": \"evening\",\n      \"status\": \"cancelled\"\n    }\n  ]\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{base_url}}/api/ferry-trips/day",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "ferry-trips",
+                    "day"
+                  ]
+                }
+              },
+              "status": "Created",
+              "code": 201,
+              "_postman_preview_language": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"date\": \"2026-09-26\",\n  \"trips\": [\n    {\n      \"trip_date\": \"2026-09-26\",\n      \"leg\": \"morning\",\n      \"trip_time\": null,\n      \"status\": \"missed\",\n      \"note\": \"Overslept\",\n      \"updated_at\": \"2026-09-26T09:12:30.000000Z\",\n      \"created_at\": \"2026-09-26T09:12:30.000000Z\",\n      \"id\": 4,\n      \"count\": 0\n    },\n    {\n      \"trip_date\": \"2026-09-26\",\n      \"leg\": \"evening\",\n      \"trip_time\": null,\n      \"status\": \"cancelled\",\n      \"note\": null,\n      \"updated_at\": \"2026-09-26T09:12:30.000000Z\",\n      \"created_at\": \"2026-09-26T09:12:30.000000Z\",\n      \"id\": 5,\n      \"count\": 0\n    }\n  ],\n  \"day_count\": 0\n}",
+              "_postman_previewlanguage": "json"
+            },
+            {
+              "name": "422 Invalid status",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"trip_date\": \"2026-09-28\",\n  \"legs\": [\n    {\n      \"leg\": \"morning\",\n      \"trip_time\": \"07:45\",\n      \"status\": \"sailed-away\"\n    }\n  ]\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{base_url}}/api/ferry-trips/day",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "ferry-trips",
+                    "day"
+                  ]
+                }
+              },
+              "status": "Unprocessable Entity",
+              "code": 422,
+              "_postman_preview_language": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"message\": \"The selected legs.0.status is invalid.\",\n  \"errors\": {\n    \"legs.0.status\": [\n      \"The selected legs.0.status is invalid.\"\n    ]\n  }\n}",
+              "_postman_previewlanguage": "json"
+            },
+            {
+              "name": "422 Same leg twice",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"trip_date\": \"2026-09-28\",\n  \"legs\": [\n    {\n      \"leg\": \"morning\",\n      \"status\": \"taken\"\n    },\n    {\n      \"leg\": \"morning\",\n      \"status\": \"missed\"\n    }\n  ]\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{base_url}}/api/ferry-trips/day",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "ferry-trips",
+                    "day"
+                  ]
+                }
+              },
+              "status": "Unprocessable Entity",
+              "code": 422,
+              "_postman_preview_language": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"message\": \"The legs.0.leg field has a duplicate value. (and 1 more error)\",\n  \"errors\": {\n    \"legs.0.leg\": [\n      \"The legs.0.leg field has a duplicate value.\"\n    ],\n    \"legs.1.leg\": [\n      \"The legs.1.leg field has a duplicate value.\"\n    ]\n  }\n}",
+              "_postman_previewlanguage": "json"
+            },
+            {
+              "name": "401 Unauthenticated",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"trip_date\": \"2026-09-28\",\n  \"legs\": [\n    {\n      \"leg\": \"morning\",\n      \"trip_time\": \"07:45\",\n      \"status\": \"taken\"\n    },\n    {\n      \"leg\": \"evening\",\n      \"trip_time\": \"18:10\",\n      \"status\": \"taken\"\n    }\n  ]\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{base_url}}/api/ferry-trips/day",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "ferry-trips",
+                    "day"
+                  ]
+                }
+              },
+              "status": "Unauthorized",
+              "code": 401,
+              "_postman_preview_language": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"message\": \"Unauthenticated.\"\n}",
+              "_postman_previewlanguage": "json"
+            }
+          ]
+        },
+        {
+          "name": "Delete a leg",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/ferry-trips/{{trip_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "ferry-trips",
+                "{{trip_id}}"
+              ]
+            },
+            "description": "Delete one recorded leg. There is no bulk delete and no whole-day delete.\n\n`DELETE /api/ferry-trips/{ferryTrip}` · Bearer token\n\n### Path parameter\n\n| Param | Type | Required | Notes |\n| --- | --- | --- | --- |\n| `ferryTrip` | integer | yes | the leg's `id` — **not** a date. `{{trip_id}}` is filled in for you by **Record a day**. |\n\nIds come from `days[].morning.id` / `days[].evening.id` in **List month**, or from\n`trips[].id` in **Record a day**.\n\nBecause an id identifies a single leg, clearing a full day takes two calls. If you only\nwant the day to stop counting, post it again with `status: \"missed\"` or `\"cancelled\"`\ninstead of deleting — that keeps the history.\n\nNo body. No soft deletes: the row is gone.\n\n### 204 No Content\n\nEmpty response body.\n\n### Failures\n\n| Cause | Code | Response |\n| --- | --- | --- |\n| Id does not exist | 404 | empty or framework-generated message — see the note below |\n| The leg belongs to **another user** | 404 | deliberately indistinguishable from \"does not exist\", so the API cannot be used to probe for other users' ids |\n| No token | 401 | `{\"message\": \"Unauthenticated.\"}` |\n\nThe body of a 404 is **not** part of the contract: `message` is empty for an ownership\nfailure, and carries Laravel's \"No query results for model ...\" text (plus a stack\ntrace when `APP_DEBUG=true`) for an unknown id. Branch on the status code, never on\nthe message.\n\nDeleting the same id twice gives 204, then 404.\n"
+          },
+          "response": [
+            {
+              "name": "204 No Content",
+              "originalRequest": {
+                "method": "DELETE",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/ferry-trips/{{trip_id}}",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "ferry-trips",
+                    "{{trip_id}}"
+                  ]
+                }
+              },
+              "status": "No Content",
+              "code": 204,
+              "_postman_preview_language": "text",
+              "header": [],
+              "cookie": [],
+              "body": "",
+              "_postman_previewlanguage": "text"
+            },
+            {
+              "name": "404 Unknown id",
+              "originalRequest": {
+                "method": "DELETE",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/ferry-trips/{{trip_id}}",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "ferry-trips",
+                    "{{trip_id}}"
+                  ]
+                }
+              },
+              "status": "Not Found",
+              "code": 404,
+              "_postman_preview_language": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"message\": \"No query results for model [App\\\\Models\\\\FerryTrip] 999\"\n}",
+              "_postman_previewlanguage": "json"
+            },
+            {
+              "name": "404 Another user's leg",
+              "originalRequest": {
+                "method": "DELETE",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/ferry-trips/{{trip_id}}",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "ferry-trips",
+                    "{{trip_id}}"
+                  ]
+                }
+              },
+              "status": "Not Found",
+              "code": 404,
+              "_postman_preview_language": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"message\": \"\"\n}",
+              "_postman_previewlanguage": "json"
+            },
+            {
+              "name": "401 Unauthenticated",
+              "originalRequest": {
+                "method": "DELETE",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/ferry-trips/{{trip_id}}",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "ferry-trips",
+                    "{{trip_id}}"
+                  ]
+                }
+              },
+              "status": "Unauthorized",
+              "code": 401,
+              "_postman_preview_language": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"message\": \"Unauthenticated.\"\n}",
+              "_postman_previewlanguage": "json"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
